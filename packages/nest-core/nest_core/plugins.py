@@ -29,7 +29,6 @@ _BUILTINS: dict[tuple[str, str], str] = {
     ("trust", "agent_receipts"): f"{_REF}.trust.agent_receipts:AgentReceiptsTrust",
     ("payments", "prepaid_credits"): f"{_REF}.payments.prepaid_credits:PrepaidCredits",
     ("payments", "streaming"): f"{_REF}.payments.streaming:StreamingPayments",
-    ("payments", "empic_escrow"): f"{_REF}.payments.empic_escrow:EMPICEscrowPayments",
     ("payments", "escrow"): f"{_REF}.payments.escrow:EscrowPayments",
     ("coordination", "contract_net"): f"{_REF}.coordination.contract_net:ContractNet",
     ("coordination", "hotstuff"): f"{_REF}.coordination.hotstuff:HotStuff",

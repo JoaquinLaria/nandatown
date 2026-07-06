@@ -97,10 +97,6 @@ def _try_load_builtin(name: str) -> None:
         )
 
         register_scenario("receipt_reputation", receipt_reputation_factory)
-    elif name == "empic_payments":
-        from nest_core.scenarios_builtin.empic_payments import empic_payments_factory
-
-        register_scenario("empic_payments", empic_payments_factory)
     elif name == "multi_attribute_market":
         from nest_core.scenarios_builtin.multi_attribute_market import (
             multi_attribute_market_factory,
