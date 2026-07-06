@@ -42,6 +42,9 @@ hybrid_x25519 = "nest_plugins_reference.privacy.hybrid_x25519:HybridX25519Privac
 [project.entry-points."nest.plugins.datafacts"]
 cid_facts = "nest_plugins_reference.datafacts.cid_facts:CidFacts"
 
+[project.entry-points."nest.plugins.negotiation"]
+checkout_frontier = "nest_plugins_reference.negotiation.checkout_frontier:CheckoutFrontier"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
