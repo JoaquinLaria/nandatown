@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+# Checkout market scenario.
+#
+# 10 shopper-vendor pairs run an agentic checkout over BOTH price and delivery
+# deadline, with hard money caps: each shopper holds a wallet budget, each
+# vendor a unit-cost floor. Vendors are scripted margin-only quoting engines
+# that offer an expedited "rush" lane early (fulfillment slack is free for an
+# in-stock vendor); the configured negotiation plugin sits in the BUYER seat,
+# the side that is real deployed software in agent-to-retail commerce.
+#
+# A deadline-aware, budget-disciplined buyer accepts the early rush logroll; a
+# deadline-blind, timeout-driven buyer holds out and closes late on a cheaper
+# slow-lane bundle that the rush quote Pareto-dominates for both sides.
+#
+# Every exchanged bundle, both parties' private utility parameters, and their
+# money caps are written to the trace (checkoutcfg/quote/deal/no_deal frames)
+# so offline validators can reconstruct utilities, check cap-feasible
+# Pareto-efficiency, and audit budget and floor discipline.
+#
+# Deterministic: per-pair weights, caps, and vendor schedules are drawn in the
+# factory from a generator seeded only by (seed, pair_index) with a fixed draw
+# order; each bargaining loop runs synchronously in its vendor's on_start, so
+# the same seed yields a byte-identical trace.
+name: checkout_market
+description: "10 shopper-vendor checkouts negotiating price + delivery under budget caps."
+
+tier: 1
+seed: 42
+
+agents:
+  count: 20
+  brain: state-machine
+  roles:
+    - name: shopper
+      count: 10
+    - name: vendor
+      count: 10
+
+layers:
+  transport: in_memory
+  comms: nest_native
+  identity: did_key
+  registry: in_memory
+  auth: jwt
+  trust: score_average
+  payments: prepaid_credits
+  coordination: contract_net
+  negotiation: checkout_frontier
+  memory: blackboard
+  privacy: noop
+  datafacts: datafacts_v1
+
+task:
+  type: checkout_market
+
+duration: "ticks: 10000"
+
+metrics:
+  - message_count
+
+output:
+  trace: ./traces/checkout_market.jsonl

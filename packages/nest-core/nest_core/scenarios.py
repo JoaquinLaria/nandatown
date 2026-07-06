@@ -107,6 +107,10 @@ def _try_load_builtin(name: str) -> None:
         )
 
         register_scenario("multi_attribute_market", multi_attribute_market_factory)
+    elif name == "checkout_market":
+        from nest_core.scenarios_builtin.checkout_market import checkout_market_factory
+
+        register_scenario("checkout_market", checkout_market_factory)
     elif name == "provenance_supply_chain":
         from nest_core.scenarios_builtin.provenance_supply_chain import (
             provenance_supply_chain_factory,
