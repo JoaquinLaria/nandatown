@@ -3294,6 +3294,334 @@ def validate_multi_attribute_pareto_optimal(
 
 
 # ---------------------------------------------------------------------------
+# Checkout market (budget-capped multi-attribute checkout) validators
+# ---------------------------------------------------------------------------
+
+
+class _CheckoutParty:
+    """One agent's utility and hard money cap, reconstructed from the trace.
+
+    Scoring reproduces the plugin's additive MAUT verbatim (clamp into the
+    feasible ranges, weight the normalized per-issue value functions, sum)
+    with the same directional convention, so a bundle scores identically here
+    and inside ``CheckoutFrontier``. ``cap`` is the hard money constraint the
+    agent declared: a buyer's wallet budget or a vendor's unit-cost floor.
+
+    Example::
+
+        p = _CheckoutParty("buyer", 0.1, 0.9, 40, 120, 1, 21, 0.0, 110)
+        p.utility(40, 1)  # 1.0
+    """
+
+    def __init__(
+        self,
+        side: str,
+        w_price: float,
+        w_deadline: float,
+        plo: int,
+        phi: int,
+        dlo: int,
+        dhi: int,
+        reservation: float,
+        cap: int,
+    ) -> None:
+        self.side = side
+        self.w_price = w_price
+        self.w_deadline = w_deadline
+        self.plo = plo
+        self.phi = phi
+        self.dlo = dlo
+        self.dhi = dhi
+        self.reservation = reservation
+        self.cap = cap
+
+    def utility(self, price: int, deadline: int) -> float:
+        """Return this agent's utility for a (price, deadline) bundle."""
+        p = max(self.plo, min(self.phi, price))
+        d = max(self.dlo, min(self.dhi, deadline))
+        if self.side == "buyer":
+            f_price = (self.phi - p) / (self.phi - self.plo)
+            f_deadline = (self.dhi - d) / (self.dhi - self.dlo)
+        else:
+            f_price = (p - self.plo) / (self.phi - self.plo)
+            f_deadline = (d - self.dlo) / (self.dhi - self.dlo)
+        return self.w_price * f_price + self.w_deadline * f_deadline
+
+
+class _CheckoutSession:
+    """Everything a single checkout session contributed to the trace.
+
+    ``bundles`` is the set of every (price, deadline) exchanged in the
+    session, the trace-observed evidence the dominance frontier is computed
+    from. ``quotes`` keeps per-quote attribution for cap auditing.
+
+    Example::
+
+        sess = _CheckoutSession()
+        sess.bundles.add((108, 1))
+    """
+
+    def __init__(self) -> None:
+        self.bundles: set[tuple[int, int]] = set()
+        self.quotes: list[tuple[str, str, int, int]] = []
+        self.buyer: str | None = None
+        self.seller: str | None = None
+        self.agreement: tuple[int, int, str] | None = None
+        self.no_deal: bool = False
+
+
+def _collect_checkout_parties(events: list[dict[str, Any]]) -> dict[str, _CheckoutParty]:
+    """Parse ``checkoutcfg:`` frames into per-agent utility-and-cap reconstructors.
+
+    Frames are ``checkoutcfg:<agent>:<side>:<w_price>:<w_deadline>:<plo>:<phi>:
+    <dlo>:<dhi>:<reservation>:<cap>``. Malformed frames (short split,
+    non-numeric fields, unknown side, or a degenerate range that would divide
+    by zero) are skipped.
+
+    Example::
+
+        parties = _collect_checkout_parties(events)
+    """
+    parties: dict[str, _CheckoutParty] = {}
+    for ev in events:
+        if ev.get("kind") != "send":
+            continue
+        msg = _message_body(ev)
+        if not msg.startswith("checkoutcfg:"):
+            continue
+        parts = msg.split(":")
+        if len(parts) < 11:
+            continue
+        agent, side = parts[1], parts[2]
+        if side not in ("buyer", "seller"):
+            continue
+        try:
+            w_price = float(parts[3])
+            w_deadline = float(parts[4])
+            plo, phi, dlo, dhi = int(parts[5]), int(parts[6]), int(parts[7]), int(parts[8])
+            reservation = float(parts[9])
+            cap = int(parts[10])
+        except ValueError:
+            continue
+        if phi <= plo or dhi <= dlo:
+            continue
+        parties[agent] = _CheckoutParty(
+            side, w_price, w_deadline, plo, phi, dlo, dhi, reservation, cap
+        )
+    return parties
+
+
+def _collect_checkout_sessions(events: list[dict[str, Any]]) -> dict[str, _CheckoutSession]:
+    """Group ``quote:``/``deal:``/``no_deal:`` frames by session id.
+
+    Example::
+
+        sessions = _collect_checkout_sessions(events)
+    """
+    sessions: dict[str, _CheckoutSession] = defaultdict(_CheckoutSession)
+    for ev in events:
+        if ev.get("kind") != "send":
+            continue
+        msg = _message_body(ev)
+        parts = msg.split(":")
+        if msg.startswith("quote:") and len(parts) >= 7:
+            sid, agent, side = parts[1], parts[2], parts[3]
+            try:
+                price, deadline = int(parts[5]), int(parts[6])
+            except ValueError:
+                continue
+            sess = sessions[sid]
+            sess.bundles.add((price, deadline))
+            sess.quotes.append((agent, side, price, deadline))
+            if side == "buyer":
+                sess.buyer = agent
+            elif side == "seller":
+                sess.seller = agent
+        elif msg.startswith("deal:") and len(parts) >= 5:
+            sid, accepting = parts[1], parts[4]
+            try:
+                price, deadline = int(parts[2]), int(parts[3])
+            except ValueError:
+                continue
+            sess = sessions[sid]
+            sess.agreement = (price, deadline, accepting)
+            sess.bundles.add((price, deadline))
+        elif msg.startswith("no_deal:") and len(parts) >= 3:
+            sessions[parts[1]].no_deal = True
+    return dict(sessions)
+
+
+def _checkout_feasible(price: int, buyer: _CheckoutParty, seller: _CheckoutParty) -> bool:
+    """Whether a price respects both declared money caps.
+
+    A bundle no wallet can pay for, or no vendor can sell at, is not evidence
+    of a reachable better deal, so infeasible bundles are excluded from the
+    dominance frontier.
+    """
+    return price <= buyer.cap and price >= seller.cap
+
+
+def validate_checkout_pareto_efficient(
+    events: list[dict[str, Any]],
+) -> list[ValidationResult]:
+    """No closed deal is Pareto-dominated by a cap-feasible bundle it exchanged.
+
+    For every session that reached a ``deal:`` outcome, this reconstructs
+    both parties' utilities and caps (from their ``checkoutcfg:`` frames) and
+    FAILS if any *other* bundle exchanged in the same session both respects
+    the two money caps and dominates the agreement under
+    :func:`_pareto_dominates`. A ``no_deal:`` session is **not** a failure: a
+    checkout can legitimately break down, and with mutually exclusive caps it
+    must.
+
+    Scope is trace-evidence-bounded, like the ``multi_attribute_market``
+    dominance check: the frontier is computed from bundles observed on the
+    wire, never from the full feasible grid. The cap filter is the checkout
+    twist: dominance is judged only over bundles both parties could actually
+    transact, exactly the eligibility rule ``CheckoutFrontier`` bargains
+    under. The adversarial power is real: the reference ``alternating_offers``
+    never reads ``conditions['deadline_days']`` and only accepts at its round
+    limit, so it closes late on a slow-lane bundle while the vendor's early
+    rush quote, feasible for every drawn budget, dominates the agreement for
+    both sides and trips this check. ``checkout_frontier`` passes because
+    every standing quote stays live: the best cap-feasible bundle the vendor
+    ever offered is accepted rather than expiring.
+
+    Guards against a vacuous pass: if no deal was scorable it FAILS with
+    ``"scenario exercised no checkout negotiation"``.
+
+    Example::
+
+        results = validate_checkout_pareto_efficient(events)
+    """
+    parties = _collect_checkout_parties(events)
+    sessions = _collect_checkout_sessions(events)
+
+    scored = 0
+    violations: list[str] = []
+    for sid in sorted(sessions):
+        sess = sessions[sid]
+        if sess.agreement is None or sess.buyer is None or sess.seller is None:
+            continue
+        buyer = parties.get(sess.buyer)
+        seller = parties.get(sess.seller)
+        if buyer is None or seller is None:
+            continue
+
+        scored += 1
+        a_price, a_deadline, _accepting = sess.agreement
+        ub_star = buyer.utility(a_price, a_deadline)
+        us_star = seller.utility(a_price, a_deadline)
+
+        for xp, xd in sorted(sess.bundles):
+            if (xp, xd) == (a_price, a_deadline):
+                continue
+            if not _checkout_feasible(xp, buyer, seller):
+                continue
+            ub_x = buyer.utility(xp, xd)
+            us_x = seller.utility(xp, xd)
+            if _pareto_dominates(ub_x, us_x, ub_star, us_star):
+                violations.append(
+                    f"session {sid}: deal ({a_price},{a_deadline}) "
+                    f"u_buyer={ub_star:.6f} u_seller={us_star:.6f} dominated by "
+                    f"({xp},{xd}) u_buyer={ub_x:.6f} u_seller={us_x:.6f}"
+                )
+                break
+
+    if scored == 0:
+        return [
+            ValidationResult(
+                "checkout_pareto_efficient",
+                False,
+                "scenario exercised no checkout negotiation",
+            )
+        ]
+    if violations:
+        return [ValidationResult("checkout_pareto_efficient", False, "; ".join(violations))]
+    return [
+        ValidationResult(
+            "checkout_pareto_efficient",
+            True,
+            f"{scored} deal(s) non-dominated by any cap-feasible exchanged bundle",
+        )
+    ]
+
+
+def validate_checkout_budget_and_floor(
+    events: list[dict[str, Any]],
+) -> list[ValidationResult]:
+    """Every quote and every deal respects the quoting agent's own money cap.
+
+    The commerce discipline check: an agent that bids beyond its wallet is
+    broken even if the final deal lands under it, and a vendor that quotes
+    below its cost floor is quoting a sale it cannot honor. FAILS if any
+    buyer ``quote:`` exceeds that buyer's declared budget, any vendor
+    ``quote:`` undercuts that vendor's declared floor, or a ``deal:`` price
+    violates either party's cap. Counterparty asks are unconstrained: a buyer
+    may open below the vendor's floor (an ask is not a transaction); only the
+    closed deal must satisfy both caps.
+
+    Guards against a vacuous pass: if no session with declared caps produced
+    a quote or a deal it FAILS with
+    ``"scenario exercised no checkout negotiation"``.
+
+    Example::
+
+        results = validate_checkout_budget_and_floor(events)
+    """
+    parties = _collect_checkout_parties(events)
+    sessions = _collect_checkout_sessions(events)
+
+    scored = 0
+    offenders: list[str] = []
+    for sid in sorted(sessions):
+        sess = sessions[sid]
+        if sess.buyer is None or sess.seller is None:
+            continue
+        buyer = parties.get(sess.buyer)
+        seller = parties.get(sess.seller)
+        if buyer is None or seller is None:
+            continue
+        if not sess.quotes and sess.agreement is None:
+            continue
+
+        scored += 1
+        for agent, side, price, _deadline in sess.quotes:
+            party = parties.get(agent)
+            if party is None:
+                continue
+            if side == "buyer" and price > party.cap:
+                offenders.append(f"session {sid}: buyer quote {price} exceeds budget {party.cap}")
+            elif side == "seller" and price < party.cap:
+                offenders.append(f"session {sid}: vendor quote {price} below floor {party.cap}")
+
+        if sess.agreement is not None:
+            a_price, _a_deadline, _accepting = sess.agreement
+            if a_price > buyer.cap:
+                offenders.append(f"session {sid}: deal price {a_price} exceeds budget {buyer.cap}")
+            if a_price < seller.cap:
+                offenders.append(f"session {sid}: deal price {a_price} below floor {seller.cap}")
+
+    if scored == 0:
+        return [
+            ValidationResult(
+                "checkout_budget_and_floor",
+                False,
+                "scenario exercised no checkout negotiation",
+            )
+        ]
+    if offenders:
+        return [ValidationResult("checkout_budget_and_floor", False, "; ".join(offenders))]
+    return [
+        ValidationResult(
+            "checkout_budget_and_floor",
+            True,
+            f"{scored} session(s) respected every declared budget and floor",
+        )
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Provenance supply-chain validators
 # ---------------------------------------------------------------------------
 
@@ -3800,6 +4128,10 @@ VALIDATORS: dict[str, list[Any]] = {
     "multi_attribute_market": [
         validate_multi_attribute_pareto_optimal,
         validate_multi_attribute_individually_rational,
+    ],
+    "checkout_market": [
+        validate_checkout_pareto_efficient,
+        validate_checkout_budget_and_floor,
     ],
     "provenance_supply_chain": [
         validate_provenance_chain_integrity,

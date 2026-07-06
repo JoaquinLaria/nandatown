@@ -1820,6 +1820,7 @@ class TestValidatorRegistry:
             "comms_versioning",
             "receipt_reputation",
             "multi_attribute_market",
+            "checkout_market",
             "provenance_supply_chain",
             "bft_hotstuff",
             "escrow_marketplace",
