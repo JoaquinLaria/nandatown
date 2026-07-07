@@ -28,13 +28,26 @@ concession, and that rule changes the guarantee class:
   ``pareto`` plugin, where a good early logroll is gone by the time
   aspiration decays, cannot occur here. In self-play, no agreement is
   Pareto-dominated by any budget-feasible bundle either side exchanged.
+- **Bounded termination**: the patience horizon is a hard stop, not just an
+  aspiration freeze. At or past ``max_rounds`` responds the agent stops
+  conceding fresh ground, re-proposes a clearing standing quote at most once
+  per session, and otherwise declines to counter (``counter_terms=None``).
+  Aspiration is frozen past the horizon, so both a repeated fresh counter
+  and a repeated echo would replay the same deterministic exchange forever;
+  standing down is the only honest move. In self-play every session ends,
+  within roughly ``max_rounds`` rounds plus a small constant, in an
+  acceptance or a breakdown the plugin itself initiates, never one imposed
+  by a driver's round cap.
 
 Hard money constraints are first-class: a buyer never accepts, echoes, or
 proposes a bundle priced above ``budget``; a vendor never goes below
 ``floor``. Caps are constraints, not utility terms, so a great-looking bundle
-the wallet cannot cover is simply ineligible. With mutually exclusive caps
-the plugin declines to counter and the negotiation breaks down cleanly
-rather than closing an unaffordable deal.
+the wallet cannot cover is simply ineligible. Cap conflicts end in an honest
+breakdown on two paths: an agent whose own cap excludes every feasible bundle
+declines to counter immediately, and with mutually exclusive but individually
+feasible caps (a wallet strictly below the vendor's floor) neither side can
+ever accept, so both stand down at the patience horizon instead of haggling
+forever.
 
 Weights are rounded to six decimal places on construction. Trace validators
 compare utilities with a ``1e-9`` tolerance; on integer bundle grids,
@@ -137,6 +150,7 @@ class CheckoutFrontier:
         self._rounds: dict[str, int] = {}
         self._quotes: dict[str, list[tuple[int, int]]] = {}
         self._fresh_bar: dict[str, float] = {}
+        self._horizon_echoes: dict[str, int] = {}
         self._session_counter = 0
 
     async def open(self, partner: AgentId, terms: Terms) -> NegotiationSession:
@@ -182,16 +196,21 @@ class CheckoutFrontier:
            far, find the best by own utility (earliest offer wins exact
            ties). If it clears this round's aspiration floor, accept it when
            it is the offer currently on the table, otherwise re-propose it
-           verbatim; a counterparty running the same rule accepts its own
-           returning quote, so convergence costs at most one extra round.
-        2. Otherwise counter with a fresh bundle from the per-attribute
+           verbatim; when a mutually clearing bundle exists, a counterparty
+           running the same rule accepts its own returning quote, so
+           convergence costs at most one extra round.
+        2. At or past the patience horizon (``max_rounds`` responds), stand
+           down: re-propose a clearing standing quote at most once per
+           session, never concede fresh ground, and otherwise decline to
+           counter. Aspiration is frozen there, so repeating either move
+           would replay the same deterministic exchange forever.
+        3. Otherwise counter with a fresh bundle from the per-attribute
            allowance box: cap-eligible, at or above aspiration, never above
            the previous fresh counter's own utility, and nearest to the
            counterparty's last quote in a distance weighted toward the
            attribute they signalled they value.
-        3. If no cap-eligible bundle exists at all, decline to counter: with
-           mutually exclusive money caps the honest outcome is a breakdown,
-           not a deal someone cannot afford.
+        4. If no cap-eligible bundle exists at all, decline to counter: a
+           wallet that covers nothing has no honest bid to make.
 
         Example::
 
@@ -204,6 +223,7 @@ class CheckoutFrontier:
         round_index = self._rounds.get(session.id, 0)
         self._rounds[session.id] = round_index + 1
         alpha = self._aspiration(round_index)
+        at_horizon = round_index >= self._max_rounds
 
         quotes = self._quotes.get(session.id, [])
         eligible_quotes = [q for q in quotes if self._eligible(q[0])]
@@ -212,8 +232,14 @@ class CheckoutFrontier:
             current = self._clamp(*self._extract(opponent))
             if current == best and self._eligible(current[0]):
                 return NegotiationResponse(accepted=True)
+            if at_horizon:
+                if self._horizon_echoes.get(session.id, 0) >= 1:
+                    return NegotiationResponse(accepted=False, counter_terms=None)
+                self._horizon_echoes[session.id] = 1
             return NegotiationResponse(accepted=False, counter_terms=self._to_terms(best))
 
+        if at_horizon:
+            return NegotiationResponse(accepted=False, counter_terms=None)
         counter = self._fresh_counter(session.id, round_index, alpha)
         if counter is None:
             return NegotiationResponse(accepted=False, counter_terms=None)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Property tests for CheckoutFrontier (Hypothesis).
 
-Four property families:
+Five property families:
 
 * **Determinism**: identical construction plus an identical offer sequence
   yields an identical response transcript (no wall-clock, no unseeded RNG).
@@ -17,6 +17,9 @@ Four property families:
 * **Hard caps and rationality**: settled deals land inside
   ``[floor, budget]`` with both utilities at or above reservation, and
   mutually exclusive caps always break down instead of dealing.
+* **Internal termination**: every self-play session ends by plugin decision
+  (acceptance or a declined counter), never by the driver's loop cap —
+  including mutually exclusive caps and echo standoffs.
 
 Weights are drawn on the six-decimal lattice (``k / 1_000_000``) with bundle
 spans capped at 15, so every nonzero utility difference on the integer grid
@@ -127,13 +130,17 @@ def _make_vendor(cfg: _Cfg, max_rounds: int = 12) -> CheckoutFrontier:
 
 async def _self_play(
     buyer: CheckoutFrontier, vendor: CheckoutFrontier, bounds: tuple[int, int, int, int]
-) -> tuple[tuple[int, int] | None, list[tuple[int, int]]]:
-    """Run two agents to settlement; return the agreement (if any) and exchanged bundles.
+) -> tuple[tuple[int, int] | None, list[tuple[int, int]], bool]:
+    """Run two agents to settlement; return (agreement, exchanged bundles, terminated).
 
     Each side opens from its best-for-self position, then alternately responds
     to the other's latest offer. An agent either accepts (the offer becomes
-    the agreement), declines without a counter (breakdown), or counters; every
-    counter is recorded and forwarded.
+    the agreement), declines without a counter (plugin-initiated breakdown),
+    or counters; every counter is recorded and forwarded. ``terminated`` is
+    True when the run ended because a plugin accepted or declined, and False
+    only if the driver loop exhausted, so tests can tell plugin behavior from
+    a harness artifact. The loop bound (60) deliberately exceeds the plugin's
+    own termination bound for ``max_rounds=25``.
     """
     plo, phi, dlo, dhi = bounds
     buyer_open = _terms(plo, dlo)
@@ -142,25 +149,25 @@ async def _self_play(
     vs = await vendor.open(AgentId("shopper"), vendor_open)
     exchanged: list[tuple[int, int]] = [(plo, dlo), (phi, dhi)]
     buyer_last, vendor_last = buyer_open, vendor_open
-    for _ in range(30):
+    for _ in range(60):
         await buyer.offer(bs, vendor_last)
         br = await buyer.respond(bs)
         if br.accepted:
-            return _pd(vendor_last), exchanged
+            return _pd(vendor_last), exchanged, True
         if br.counter_terms is None:
-            return None, exchanged
+            return None, exchanged, True
         buyer_last = br.counter_terms
         exchanged.append(_pd(buyer_last))
 
         await vendor.offer(vs, buyer_last)
         vr = await vendor.respond(vs)
         if vr.accepted:
-            return _pd(buyer_last), exchanged
+            return _pd(buyer_last), exchanged, True
         if vr.counter_terms is None:
-            return None, exchanged
+            return None, exchanged, True
         vendor_last = vr.counter_terms
         exchanged.append(_pd(vendor_last))
-    return None, exchanged
+    return None, exchanged, False
 
 
 @given(payload=_cfg_and_offers())
@@ -229,7 +236,7 @@ def test_selfplay_agreement_never_dominated_by_exchanged_bundle(cfg: _Cfg) -> No
     """
     buyer = _make_buyer(cfg, max_rounds=25)
     vendor = _make_vendor(cfg, max_rounds=25)
-    agreement, exchanged = asyncio.run(
+    agreement, exchanged, _terminated = asyncio.run(
         _self_play(buyer, vendor, (cfg.plo, cfg.phi, cfg.dlo, cfg.dhi))
     )
     if agreement is None:
@@ -266,7 +273,7 @@ def test_selfplay_agreement_respects_caps_and_reservation(cfg: _Cfg) -> None:
     """Settled deals price inside [floor, budget] and clear both reservations."""
     buyer = _make_buyer(cfg, max_rounds=25)
     vendor = _make_vendor(cfg, max_rounds=25)
-    agreement, _exchanged = asyncio.run(
+    agreement, _exchanged, _terminated = asyncio.run(
         _self_play(buyer, vendor, (cfg.plo, cfg.phi, cfg.dlo, cfg.dhi))
     )
     if agreement is None:
@@ -281,8 +288,36 @@ def test_selfplay_agreement_respects_caps_and_reservation(cfg: _Cfg) -> None:
     assert vendor.utility(_terms(ap, ad)) >= cfg.reservation - _EPS
 
 
-def test_disjoint_caps_always_break_down() -> None:
-    """A wallet strictly below the vendor's floor can never produce a deal."""
+@given(cfg=_cfgs())
+@settings(max_examples=300, deadline=None)
+def test_selfplay_terminates_internally(cfg: _Cfg) -> None:
+    """Every self-play session ends by plugin decision, never by the driver's cap.
+
+    This is the termination guarantee behind the bounded-termination claim:
+    past the patience horizon an agent re-proposes a clearing standing quote
+    at most once and otherwise declines to counter, so even mutually
+    exclusive caps and echo standoffs end in an acceptance or a
+    plugin-initiated breakdown. The driver's loop bound (60) exceeds the
+    plugin's own termination bound for ``max_rounds=25``; ``terminated`` may
+    therefore never be False.
+    """
+    buyer = _make_buyer(cfg, max_rounds=25)
+    vendor = _make_vendor(cfg, max_rounds=25)
+    _agreement, _exchanged, terminated = asyncio.run(
+        _self_play(buyer, vendor, (cfg.plo, cfg.phi, cfg.dlo, cfg.dhi))
+    )
+    assert terminated, "self-play outlived the plugin's termination bound"
+
+
+def test_disjoint_caps_break_down_by_plugin_decision() -> None:
+    """A wallet strictly below the vendor's floor ends in a plugin-initiated no-deal.
+
+    Both caps are individually feasible (the buyer can afford 40-45, the
+    vendor can sell at 50-60) so neither side declines up front; neither can
+    ever accept the other, and the plugin itself must stand down at the
+    patience horizon. Asserting ``terminated`` distinguishes that decline
+    from the driver loop merely running out.
+    """
     cfg = _Cfg(
         plo=40,
         phi=60,
@@ -297,10 +332,11 @@ def test_disjoint_caps_always_break_down() -> None:
     )
     buyer = _make_buyer(cfg, max_rounds=25)
     vendor = _make_vendor(cfg, max_rounds=25)
-    agreement, _exchanged = asyncio.run(
+    agreement, _exchanged, terminated = asyncio.run(
         _self_play(buyer, vendor, (cfg.plo, cfg.phi, cfg.dlo, cfg.dhi))
     )
     assert agreement is None
+    assert terminated, "breakdown must be the plugin declining, not the loop exhausting"
 
 
 def test_flagship_holds_on_the_pinned_pareto_counterexample() -> None:
@@ -326,7 +362,7 @@ def test_flagship_holds_on_the_pinned_pareto_counterexample() -> None:
     )
     buyer = _make_buyer(cfg, max_rounds=25)
     vendor = _make_vendor(cfg, max_rounds=25)
-    agreement, exchanged = asyncio.run(
+    agreement, exchanged, _terminated = asyncio.run(
         _self_play(buyer, vendor, (cfg.plo, cfg.phi, cfg.dlo, cfg.dhi))
     )
     assert agreement is not None, "expected this configuration to settle"

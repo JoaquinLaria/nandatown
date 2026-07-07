@@ -213,6 +213,42 @@ def test_no_eligible_bundle_declines_to_counter() -> None:
     assert result[0] == (False, None)
 
 
+# Patience-horizon termination
+
+
+def test_declines_fresh_counters_past_horizon() -> None:
+    """Past max_rounds responds, the agent stops conceding and declines to counter.
+
+    Aspiration is frozen at the horizon, so a fresh counter would repeat the
+    same deterministic exchange forever; the plugin stands down instead of
+    relying on a driver's round cap to end the session.
+    """
+    buyer = _buyer(max_rounds=3)
+    result = asyncio.run(_respond_to(buyer, [(60, 11)] * 5))
+    for accepted, counter in result[:3]:
+        assert accepted is False
+        assert counter is not None
+    assert result[3] == (False, None)
+    assert result[4] == (False, None)
+
+
+def test_echoes_at_most_once_past_horizon_then_accepts_or_declines() -> None:
+    """Past the horizon a clearing standing quote is re-proposed once, then never again.
+
+    The counterparty's decision on a repeated echo under frozen aspiration is
+    deterministic, so repeating it is provably futile: the second attempt
+    declines. A clearing offer that arrives on the table is still accepted,
+    at any round.
+    """
+    buyer = _buyer(max_rounds=2)
+    result = asyncio.run(_respond_to(buyer, [(44, 2), (60, 11), (60, 11), (60, 11), (44, 2)]))
+    assert result[0] == (False, (40, 1))  # aspiration 1.0: fresh counter
+    assert result[1] == (False, (44, 2))  # pre-horizon echo of the standing quote
+    assert result[2] == (False, (44, 2))  # the one allowed past-horizon echo
+    assert result[3] == (False, None)  # repeat echo is futile: decline
+    assert result[4][0] is True  # a clearing current offer is accepted even now
+
+
 # Direction reading
 
 
