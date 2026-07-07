@@ -27,6 +27,9 @@ description: "10 shopper-vendor checkouts negotiating price + delivery under bud
 tier: 1
 seed: 42
 
+# The agents block is descriptive, matching the multi_attribute_market
+# convention: the checkout_market factory derives its population from
+# N_PAIRS in scenarios_builtin/checkout_market.py, which is authoritative.
 agents:
   count: 20
   brain: state-machine

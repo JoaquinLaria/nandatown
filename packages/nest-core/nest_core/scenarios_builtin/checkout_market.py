@@ -177,6 +177,9 @@ def _construct_negotiator(neg_cls: Any, agent_id: AgentId, candidate: dict[str, 
     checkout config while the reference ``AlternatingOffers`` takes only
     ``patience``. Forwarding just the kwargs that name real parameters lets
     the YAML swap the ``negotiation:`` layer without a ``TypeError``.
+    Deliberately duplicated from the merged ``multi_attribute_market``
+    builder rather than imported: that module is a merged submission the
+    charter forbids modifying, and its helper is private.
 
     Example::
 
@@ -352,9 +355,12 @@ class CheckoutVendorAgent(StateMachineAgent):
 def checkout_market_factory(config: ScenarioConfig, plugins: dict[str, Any]) -> dict[AgentId, Any]:
     """Build ten pairs: a scripted margin-only vendor against the configured buyer.
 
-    Each pair's buyer weights, money caps, and vendor schedule are derived in
-    the factory from a generator seeded only by ``(config.seed, pair_index)``
-    with a fixed draw order, before any agent runs. The buyer is the
+    The population comes from :data:`N_PAIRS`; the YAML ``agents`` block is
+    descriptive documentation of the same shape (the sibling market
+    scenario's convention). Each pair's buyer weights, money caps, and
+    vendor schedule are derived in the factory from a generator seeded only
+    by ``(config.seed, pair_index)`` with a fixed draw order, before any
+    agent runs. The buyer is the
     configured ``negotiation`` plugin, instantiated through
     :func:`_construct_negotiator` so swapping the layer in the YAML swaps the
     strategy under test; its instance is also injected via ``_agent_plugins``

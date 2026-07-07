@@ -127,6 +127,26 @@ def test_pareto_validator_fails_vacuous_trace() -> None:
     assert "no checkout negotiation" in result.detail
 
 
+def test_validators_surface_unscorable_sessions() -> None:
+    """A deal whose parties lack checkoutcfg frames is counted, not silently skipped."""
+    events = [
+        *_cfg_frames(pair=1),
+        _send("quote:pair-1:vendor-1:seller:2:108:1"),
+        _send("quote:pair-1:shopper-1:buyer:2:40:1"),
+        _send("deal:pair-1:108:1:shopper-1"),
+        # A second session with no config frames at all.
+        _send("quote:pair-9:vendor-9:seller:1:100:5"),
+        _send("quote:pair-9:shopper-9:buyer:1:50:1"),
+        _send("deal:pair-9:100:5:shopper-9"),
+    ]
+    pareto = validate_checkout_pareto_efficient(events)[0]
+    assert pareto.passed, pareto.detail
+    assert "1 deal(s) unscorable" in pareto.detail
+    caps = validate_checkout_budget_and_floor(events)[0]
+    assert caps.passed, caps.detail
+    assert "1 session(s) unscorable" in caps.detail
+
+
 # Validator direct-call tests: budget and floor discipline
 
 

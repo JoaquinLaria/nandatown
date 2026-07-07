@@ -3488,7 +3488,9 @@ def validate_checkout_pareto_efficient(
     ever offered is accepted rather than expiring.
 
     Guards against a vacuous pass: if no deal was scorable it FAILS with
-    ``"scenario exercised no checkout negotiation"``.
+    ``"scenario exercised no checkout negotiation"``. Deals that cannot be
+    scored because a party's ``checkoutcfg`` frame is missing or malformed
+    are not dropped silently: their count is surfaced in the result detail.
 
     Example::
 
@@ -3498,14 +3500,16 @@ def validate_checkout_pareto_efficient(
     sessions = _collect_checkout_sessions(events)
 
     scored = 0
+    unscorable = 0
     violations: list[str] = []
     for sid in sorted(sessions):
         sess = sessions[sid]
-        if sess.agreement is None or sess.buyer is None or sess.seller is None:
+        if sess.agreement is None:
             continue
-        buyer = parties.get(sess.buyer)
-        seller = parties.get(sess.seller)
+        buyer = parties.get(sess.buyer) if sess.buyer is not None else None
+        seller = parties.get(sess.seller) if sess.seller is not None else None
         if buyer is None or seller is None:
+            unscorable += 1
             continue
 
         scored += 1
@@ -3528,21 +3532,24 @@ def validate_checkout_pareto_efficient(
                 )
                 break
 
+    skipped = f"; {unscorable} deal(s) unscorable (missing checkoutcfg)" if unscorable else ""
     if scored == 0:
         return [
             ValidationResult(
                 "checkout_pareto_efficient",
                 False,
-                "scenario exercised no checkout negotiation",
+                "scenario exercised no checkout negotiation" + skipped,
             )
         ]
     if violations:
-        return [ValidationResult("checkout_pareto_efficient", False, "; ".join(violations))]
+        return [
+            ValidationResult("checkout_pareto_efficient", False, "; ".join(violations) + skipped)
+        ]
     return [
         ValidationResult(
             "checkout_pareto_efficient",
             True,
-            f"{scored} deal(s) non-dominated by any cap-feasible exchanged bundle",
+            f"{scored} deal(s) non-dominated by any cap-feasible exchanged bundle" + skipped,
         )
     ]
 
@@ -3563,7 +3570,10 @@ def validate_checkout_budget_and_floor(
 
     Guards against a vacuous pass: if no session with declared caps produced
     a quote or a deal it FAILS with
-    ``"scenario exercised no checkout negotiation"``.
+    ``"scenario exercised no checkout negotiation"``. Active sessions that
+    cannot be scored because a party's ``checkoutcfg`` frame is missing or
+    malformed are not dropped silently: their count is surfaced in the
+    result detail.
 
     Example::
 
@@ -3573,16 +3583,16 @@ def validate_checkout_budget_and_floor(
     sessions = _collect_checkout_sessions(events)
 
     scored = 0
+    unscorable = 0
     offenders: list[str] = []
     for sid in sorted(sessions):
         sess = sessions[sid]
-        if sess.buyer is None or sess.seller is None:
-            continue
-        buyer = parties.get(sess.buyer)
-        seller = parties.get(sess.seller)
-        if buyer is None or seller is None:
-            continue
         if not sess.quotes and sess.agreement is None:
+            continue
+        buyer = parties.get(sess.buyer) if sess.buyer is not None else None
+        seller = parties.get(sess.seller) if sess.seller is not None else None
+        if buyer is None or seller is None:
+            unscorable += 1
             continue
 
         scored += 1
@@ -3602,21 +3612,24 @@ def validate_checkout_budget_and_floor(
             if a_price < seller.cap:
                 offenders.append(f"session {sid}: deal price {a_price} below floor {seller.cap}")
 
+    skipped = f"; {unscorable} session(s) unscorable (missing checkoutcfg)" if unscorable else ""
     if scored == 0:
         return [
             ValidationResult(
                 "checkout_budget_and_floor",
                 False,
-                "scenario exercised no checkout negotiation",
+                "scenario exercised no checkout negotiation" + skipped,
             )
         ]
     if offenders:
-        return [ValidationResult("checkout_budget_and_floor", False, "; ".join(offenders))]
+        return [
+            ValidationResult("checkout_budget_and_floor", False, "; ".join(offenders) + skipped)
+        ]
     return [
         ValidationResult(
             "checkout_budget_and_floor",
             True,
-            f"{scored} session(s) respected every declared budget and floor",
+            f"{scored} session(s) respected every declared budget and floor" + skipped,
         )
     ]
 
