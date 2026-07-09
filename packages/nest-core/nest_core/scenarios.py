@@ -91,6 +91,10 @@ def _try_load_builtin(name: str) -> None:
         from nest_core.scenarios_builtin.comms_versioning import comms_versioning_factory
 
         register_scenario("comms_versioning", comms_versioning_factory)
+    elif name == "comms_downgrade":
+        from nest_core.scenarios_builtin.comms_downgrade import comms_downgrade_factory
+
+        register_scenario("comms_downgrade", comms_downgrade_factory)
     elif name == "receipt_reputation":
         from nest_core.scenarios_builtin.receipt_reputation import (
             receipt_reputation_factory,
@@ -127,3 +131,21 @@ def _try_load_builtin(name: str) -> None:
         )
 
         register_scenario("escrow_marketplace", escrow_marketplace_factory)
+    elif name == "failure_detection":
+        from nest_core.scenarios_builtin.failure_detection import (
+            failure_detection_factory,
+        )
+
+        register_scenario("failure_detection", failure_detection_factory)
+    elif name == "parc_migration":
+        from nest_core.scenarios_builtin.parc_migration import (
+            parc_migration_factory,
+        )
+
+        register_scenario("parc_migration", parc_migration_factory)
+    elif name == "rogue_trusted_agent":
+        from nest_core.scenarios_builtin.rogue_trusted_agent import (
+            rogue_trusted_agent_factory,
+        )
+
+        register_scenario("rogue_trusted_agent", rogue_trusted_agent_factory)
